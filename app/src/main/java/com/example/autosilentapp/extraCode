@@ -1,0 +1,137 @@
+
+package com.example.autosilentapp
+
+import android.app.Dialog
+import android.app.TimePickerDialog
+import android.os.Bundle
+import android.text.format.DateFormat
+import android.widget.TimePicker
+import androidx.fragment.app.DialogFragment
+import java.util.*
+
+class TimePickerFragment : DialogFragment(), TimePickerDialog.OnTimeSetListener {
+
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        // Use the current time as the default values for the picker
+        val c = Calendar.getInstance()
+        val hour = c.get(Calendar.HOUR_OF_DAY)
+        val minute = c.get(Calendar.MINUTE)
+
+        // Create a new instance of TimePickerDialog and return it
+        return TimePickerDialog(activity, this, hour, minute, DateFormat.is24HourFormat(activity))
+    }
+
+    override fun onTimeSet(view: TimePicker, hourOfDay: Int, minute: Int) {
+        // Do something with the time chosen by the user
+    }
+}
+////////////////////////////////////////////////////////////////////////////////
+
+import android.content.Context
+import android.media.AudioManager
+import android.os.Build
+import androidx.annotation.RequiresApi
+import androidx.core.util.Pair
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+import java.util.*
+import java.util.concurrent.TimeUnit
+
+class com.example.autosilentapp.MyAlarmManager(private val context: Context) {
+    private val timeDao: TimeDao by lazy { AppDatabase.getInstance(context).timeDao() }
+
+    companion object {
+        private const val WORK_TAG = "silencePhoneWork"
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    fun startAlarm() {
+        CoroutineScope(Dispatchers.IO).launch {
+            val (startTime, endTime) = getTimes()
+            val startTimeInMinutes = getTimeInMinutes(startTime)
+            val endTimeInMinutes = getTimeInMinutes(endTime)
+            val currentTimeInMinutes = getTimeInMinutes(getCurrentTime())
+
+            val shouldSilence = when {
+                startTimeInMinutes > endTimeInMinutes -> {
+                    // Start and end time are on different days
+                    currentTimeInMinutes in (startTimeInMinutes..1440) || currentTimeInMinutes in (0..endTimeInMinutes)
+                }
+                else -> {
+                    // Start and end time are on the same day
+                    currentTimeInMinutes in (startTimeInMinutes..endTimeInMinutes)
+                }
+            }
+
+            if (shouldSilence) {
+                setSilentMode()
+                scheduleEndAlarm(endTime)
+            } else {
+                restoreSoundMode()
+                cancelEndAlarm()
+            }
+        }
+    }
+
+    private suspend fun getTimes(): Pair<String, String> {
+        return Pair(timeDao.getStartTime(), timeDao.getEndTime())
+    }
+
+    private fun getCurrentTime(): String {
+        val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
+        return formatter.format(Date())
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun getTimeInMinutes(timeString: String): Int {
+        val time = LocalTime.parse(timeString, DateTimeFormatter.ofPattern("HH:mm"))
+        return time.hour * 60 + time.minute
+    }
+
+    private fun setSilentMode() {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
+    }
+
+    private fun restoreSoundMode() {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
+    }
+
+    private fun scheduleEndAlarm(endTime: String) {
+        val endMillis = getMillisFromTimeString(endTime)
+        val delayMillis = endMillis - System.currentTimeMillis()
+
+        val workRequest = PeriodicWorkRequestBuilder<EndAlarmWorker>(
+            1, TimeUnit.DAYS
+        ).setInitialDelay(delayMillis, TimeUnit.MILLISECONDS)
+            .addTag(WORK_TAG)
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            WORK_TAG,
+            ExistingPeriodicWorkPolicy.REPLACE,
+            workRequest
+        )
+    }
+
+    private fun cancelEndAlarm() {
+        WorkManager.getInstance(context).cancelAllWorkByTag(WORK_TAG)
+    }
+
+    private fun getMillisFromTimeString(timeString: String): Long {
+        val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val date = formatter.parse(timeString)
+        return date.time
+    }
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
